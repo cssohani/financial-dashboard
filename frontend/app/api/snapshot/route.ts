@@ -88,6 +88,7 @@ function computeReturnsFromWeekly(series: Record<string, Record<string, string>>
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
+  const refresh = searchParams.get('refresh') === '1';
   const rawTicker = (searchParams.get('ticker') || '').trim().toUpperCase();
 
   // Basic ticker validation (US-style). You can loosen later.
@@ -98,12 +99,16 @@ export async function GET(req: Request) {
   const cacheKey = `snapshot:v1:${rawTicker}`;
   const cached = getCache<CompanySnapshot>(cacheKey);
 
-  if (cached.hit) {
-    return NextResponse.json({
-      ...cached.value,
-      meta: { ...cached.value.meta, cached: true, cacheAgeSeconds: cached.ageSeconds },
-    });
+  if (!refresh) {
+    const cached = getCache<CompanySnapshot>(cacheKey);
+    if (cached.hit) {
+      return NextResponse.json({
+        ...cached.value,
+        meta: { ...cached.value.meta, cached: true, cacheAgeSeconds: cached.ageSeconds },
+      });
+    }
   }
+
 
   const notes: string[] = [];
 
