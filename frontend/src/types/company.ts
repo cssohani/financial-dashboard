@@ -1,4 +1,9 @@
 export type CompanySnapshot = {
+  priceHistory1Y: Array<{
+    date: string;  // YYYY-MM-DD
+    close: number; // adjusted close
+  }>; 
+
   ticker: string;
   fetchedAt: string; // ISO timestamp (server time)
 

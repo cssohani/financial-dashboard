@@ -12,6 +12,10 @@ import { MetricsCard } from '@/src/components/cards/MetricsCard';
 import { FinancialHealthCard } from '@/src/components/cards/FinancialHealthCard';
 import { PerformanceCard } from '@/src/components/cards/PerformanceCard';
 import { CardSkeleton } from '@/src/components/CardSkeleton';
+import { EarningsBrief } from '@/src/components/EarningsBrief';
+import { PriceChartCard } from '@/src/components/PriceChartCard';
+
+
 
 
 
@@ -95,6 +99,12 @@ export default function TickerDashboardShell({ initialTicker }: { initialTicker:
               {data.meta.source}
             </div>
 
+            <div className="mb-4">
+              <PriceChartCard data={data} />
+            </div>
+
+            
+
             <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
               <div className="lg:col-span-2">
                 <IdentityCard data={data} />
@@ -103,6 +113,10 @@ export default function TickerDashboardShell({ initialTicker }: { initialTicker:
               <MetricsCard data={data} />
               <FinancialHealthCard data={data} />
               <PerformanceCard data={data} />
+            </div>
+
+            <div className="mt-8">
+              <EarningsBrief ticker={data.ticker} />
             </div>
           </>
         )}
