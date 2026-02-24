@@ -56,7 +56,7 @@ export default function TickerDashboardShell({ initialTicker }: { initialTicker:
         <div className="mb-6 flex flex-col gap-4">
           <div className="flex items-end justify-between gap-4">
             <div>
-              <div className="text-xl font-semibold">Financial Research Dashboard</div>
+              <div className="text-xl font-semibold">MarketScope - Financial Research Dashboard</div>
               {/* <div className="text-sm text-zinc-500">
                 Shareable route: <span className="font-mono">/ticker/{ticker || '...'}</span>
               </div> */}
