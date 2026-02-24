@@ -10,19 +10,31 @@ type State =
   | { status: 'error'; data: CompanySnapshot | null; error: string };
 
 async function fetchSnapshot(ticker: string, refresh?: boolean): Promise<CompanySnapshot> {
-    const url = refresh
+  const url = refresh
     ? `/api/snapshot?ticker=${encodeURIComponent(ticker)}&refresh=1`
     : `/api/snapshot?ticker=${encodeURIComponent(ticker)}`;
 
-  const res = await fetch(`/api/snapshot?ticker=${encodeURIComponent(ticker)}`);
+  const res = await fetch(url, {
+    cache: refresh ? 'no-store' : 'default',
+  });
+
   if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    const msg = body?.error || `Request failed (${res.status})`;
+    // Upstream failures (e.g. 502) are often NOT JSON.
+    const text = await res.text().catch(() => '');
+    let msg = `Request failed (${res.status})`;
+
+    try {
+      const body = text ? JSON.parse(text) : {};
+      msg = (body as any)?.error || (body as any)?.message || msg;
+    } catch {
+      if (text) msg = text.slice(0, 200);
+    }
+
     const err = new Error(msg) as Error & { status?: number };
     err.status = res.status;
     throw err;
-
   }
+
   return (await res.json()) as CompanySnapshot;
 }
 
@@ -32,34 +44,38 @@ export function useCompanySnapshot(initialTicker?: string) {
 
   const canFetch = useMemo(() => /^[A-Z.\-]{1,10}$/.test(ticker), [ticker]);
 
-  const run = useCallback(async (overrideTicker?: string, opts?: { refresh?: boolean }) => {
-    const sym = (overrideTicker ?? ticker).trim().toUpperCase();
-    if (!/^[A-Z.\-]{1,10}$/.test(sym)) {
-      setState({ status: 'error', data: null, error: 'Enter a valid ticker (e.g. AAPL).' });
-      return;
-    }
+  const run = useCallback(
+    async (overrideTicker?: string, opts?: { refresh?: boolean }) => {
+      const sym = (overrideTicker ?? ticker).trim().toUpperCase();
 
-    setState((prev) => ({ status: 'loading', data: prev.data, error: null }));
-    try {
-      const data = await fetchSnapshot(sym, opts?.refresh);
-      setState({ status: 'success', data, error: null });
-    } catch (e: any) {
-      const status = e?.status as number | undefined;
+      if (!/^[A-Z.\-]{1,10}$/.test(sym)) {
+        setState({ status: 'error', data: null, error: 'Enter a valid ticker (e.g. AAPL).' });
+        return;
+      }
 
-      const message =
-        status === 429
-          ? 'Rate limited by Alpha Vantage (free tier). Wait ~60 seconds, then try again. Avoid rapid refreshes during development.'
-          : e?.message || 'Something went wrong.';
+      setState((prev) => ({ status: 'loading', data: prev.data, error: null }));
 
-      setState((prev) => ({
-        status: 'error',
-        data: prev.data,
-        error: message,
-      }));
-    }
-  }, [ticker]);
+      try {
+        const data = await fetchSnapshot(sym, opts?.refresh);
+        setState({ status: 'success', data, error: null });
+      } catch (e: any) {
+        const status = e?.status as number | undefined;
 
-  // If you land directly on /ticker/XYZ we want an auto-fetch
+        const message =
+          status === 429
+            ? 'Rate limited by Twelve Data. Wait ~60 seconds, then try again.'
+            : e?.message || 'Something went wrong.';
+
+        setState((prev) => ({
+          status: 'error',
+          data: prev.data,
+          error: message,
+        }));
+      }
+    },
+    [ticker]
+  );
+
   useEffect(() => {
     if (initialTicker) {
       const sym = initialTicker.trim().toUpperCase();

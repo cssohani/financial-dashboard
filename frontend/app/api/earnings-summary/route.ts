@@ -10,16 +10,11 @@ type ReqBody = {
 };
 
 function cleanInput(text: string) {
-  // keep it simple: trim and cap size to protect your API bill
   const t = text.trim();
   const MAX = 40_000; // chars
   return t.length > MAX ? t.slice(0, MAX) : t;
 }
 
-/**
- * PROVIDER-AGNOSTIC placeholder.
- * Replace this with your provider call (OpenAI/Anthropic/etc).
- */
 async function callLLM(args: { prompt: string; model: string; provider: string }): Promise<string> {
   if (args.provider !== 'openai') {
     throw new Error(`LLM_PROVIDER is ${args.provider}, but this route is wired for OpenAI.`);
@@ -42,19 +37,33 @@ async function callLLM(args: { prompt: string; model: string; provider: string }
   const content = resp.choices[0]?.message?.content;
   if (!content) throw new Error('OpenAI returned empty response');
 
-  // Sometimes models wrap JSON in ```json ...```. Strip it defensively.
   return content.replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```$/i, '').trim();
 }
 
-
 function buildPrompt(input: { ticker?: string; text: string }) {
-  // Key rules:
-  // - structured JSON only
-  // - no hallucinated numbers
-  // - every claim must include evidence quote from the input text
+  // We ask for a wrapper object that contains a relevance decision and (if relevant) a brief
+  // matching your existing EarningsBriefSchema shape.
   return `
-You are an analyst assistant. Summarize the provided earnings-related text for investors.
-Return ONLY valid JSON matching this schema:
+You are a STRICT relevance filter + earnings brief generator.
+
+Company context:
+- Ticker: ${input.ticker ?? 'N/A'}
+
+Your job:
+1) Determine if the INPUT TEXT is primarily about the company identified by the ticker above.
+   - Relevant if it discusses that company's earnings/results, guidance, operations, products, risks, outlook, management commentary, or financial metrics.
+   - NOT relevant if it is about another company, a general macro/market topic, unrelated content, or nonsense.
+   - If unsure, be conservative and mark NOT relevant.
+
+2) If NOT relevant:
+   - Return isRelevant=false
+   - Provide a short reason
+   - Set brief=null
+
+3) If relevant:
+   - Return isRelevant=true
+   - Provide a short reason
+   - Provide brief as valid JSON matching this schema exactly:
 
 {
   "overview": { "text": string, "evidence": string } | null,
@@ -65,18 +74,24 @@ Return ONLY valid JSON matching this schema:
   "meta": { "generatedAt": string, "model": string, "provider": string, "inputChars": number, "notes": string[] }
 }
 
-Rules:
-- Use ONLY facts that appear explicitly in the input text.
-- Every bullet MUST include an "evidence" field that is a direct quote from the input.
+Rules for brief (when relevant):
+- Use ONLY facts explicitly present in the input text.
+- EVERY item MUST include an "evidence" field that is a direct quote from the input.
 - Do NOT invent numbers. If a number isn't present, omit it.
 - Keep overview to 1–2 sentences.
 - positives: exactly 3 items if possible (otherwise fewer).
 - concerns: exactly 3 items if possible (otherwise fewer).
-- guidance: set null if no guidance/outlook is explicitly mentioned.
+- guidance: null if no guidance/outlook is explicitly mentioned.
 - notableNumbers: include key metrics only if explicitly stated (Revenue, EPS, margin, FCF, etc).
 
-Context:
-Ticker: ${input.ticker ?? 'N/A'}
+Output format:
+Return ONLY valid JSON with exactly these keys:
+{
+  "isRelevant": boolean,
+  "confidence": number,
+  "reason": string,
+  "brief": object | null
+}
 
 INPUT TEXT:
 """${input.text}"""
@@ -88,10 +103,7 @@ export async function POST(req: Request) {
   const text = cleanInput(body.text ?? '');
 
   if (text.length < 200) {
-    return NextResponse.json(
-      { error: 'Paste at least ~200 characters of earnings text.' },
-      { status: 400 }
-    );
+    return NextResponse.json({ error: 'Paste at least ~200 characters of earnings text.' }, { status: 400 });
   }
 
   const provider = process.env.LLM_PROVIDER || 'unconfigured';
@@ -102,8 +114,9 @@ export async function POST(req: Request) {
         ? process.env.ANTHROPIC_MODEL || 'claude-3-5-sonnet-latest'
         : 'unconfigured';
 
+  // Cache by provider/model/ticker/text so we don't re-bill on repeats
   const key = await sha256(`${provider}:${model}:${body.ticker ?? ''}:${text}`);
-  const cacheKey = `earnings:v1:${key}`;
+  const cacheKey = `earnings:v2:${key}`;
 
   const cached = getCache<any>(cacheKey);
   if (cached.hit) {
@@ -119,24 +132,36 @@ export async function POST(req: Request) {
   try {
     raw = await callLLM({ prompt, provider, model });
   } catch (e: any) {
-    return NextResponse.json(
-      { error: e?.message || 'LLM call failed.' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: e?.message || 'LLM call failed.' }, { status: 500 });
   }
 
-  // Parse/validate
-  let parsed: unknown;
+  // Parse wrapper JSON
+  let parsed: any;
   try {
     parsed = JSON.parse(raw);
   } catch {
+    return NextResponse.json({ error: 'Model returned non-JSON output.' }, { status: 500 });
+  }
+
+  const isRelevant = Boolean(parsed?.isRelevant);
+  const confidence =
+    typeof parsed?.confidence === 'number' && Number.isFinite(parsed.confidence) ? parsed.confidence : null;
+  const reason = typeof parsed?.reason === 'string' ? parsed.reason : 'Input does not appear to match the selected ticker.';
+
+  if (!isRelevant || !parsed?.brief) {
+    // Return a clean UX error so your UI shows a nice red banner
     return NextResponse.json(
-      { error: 'Model returned non-JSON output.' },
-      { status: 500 }
+      {
+        error: `That text doesn’t look like it’s about ${body.ticker ?? 'the selected company'}. ${reason}${
+          confidence !== null ? ` (confidence: ${confidence.toFixed(2)})` : ''
+        }`,
+      },
+      { status: 400 }
     );
   }
 
-  const validated = EarningsBriefSchema.safeParse(parsed);
+  // Validate the brief against your existing schema
+  const validated = EarningsBriefSchema.safeParse(parsed.brief);
   if (!validated.success) {
     return NextResponse.json(
       { error: 'Model returned invalid JSON shape.', details: validated.error.flatten() },
@@ -153,7 +178,7 @@ export async function POST(req: Request) {
       model,
       provider,
       inputChars: text.length,
-      notes: validated.data.meta.notes ?? [],
+      notes: [...(validated.data.meta.notes ?? []), 'relevance_gate_passed'],
     },
   };
 

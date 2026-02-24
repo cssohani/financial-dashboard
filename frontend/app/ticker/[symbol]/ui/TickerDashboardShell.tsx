@@ -18,7 +18,24 @@ import { PriceChartCard } from '@/src/components/PriceChartCard';
 
 
 
+export function getNiceTickerError(err: unknown): string {
+  const raw =
+    typeof err === "string"
+      ? err
+      : (err as any)?.message ?? (err as any)?.toString?.() ?? "";
 
+  const msg = raw.toLowerCase();
+
+  // Rate limit / credits / throttling
+  if (msg.includes("limit")) {
+    return "API limit reached. Please try again in a minute.";
+  }
+
+  
+  return "Please enter a valid ticker.";
+  
+
+}
 
 export default function TickerDashboardShell({ initialTicker }: { initialTicker: string }) {
   const router = useRouter();
@@ -39,10 +56,10 @@ export default function TickerDashboardShell({ initialTicker }: { initialTicker:
         <div className="mb-6 flex flex-col gap-4">
           <div className="flex items-end justify-between gap-4">
             <div>
-              <div className="text-xl font-semibold">Mini Financial Research Dashboard</div>
-              <div className="text-sm text-zinc-500">
+              <div className="text-xl font-semibold">Financial Research Dashboard</div>
+              {/* <div className="text-sm text-zinc-500">
                 Shareable route: <span className="font-mono">/ticker/{ticker || '...'}</span>
-              </div>
+              </div> */}
             </div>
 
             <button
@@ -67,7 +84,7 @@ export default function TickerDashboardShell({ initialTicker }: { initialTicker:
 
           {status === 'error' && (
             <div className="rounded-xl border border-red-900/40 bg-red-950/30 px-4 py-3 text-sm text-red-200">
-              {error}
+              {getNiceTickerError(error)}
             </div>
           )}
         </div>

@@ -13,8 +13,7 @@ export function FinancialHealthCard({ data }: { data: CompanySnapshot }) {
       <StatRow label="Gross Profit (TTM)" value={formatBigMoney(m.grossProfitTTM, currency)} />
 
       <div className="mt-3 text-xs text-zinc-600">
-        Note: Alpha Vantage’s Overview fields can be missing for some tickers. The UI is built to degrade
-        gracefully.
+        Note: Fields can be missing for some tickers.
       </div>
     </InfoCard>
   );

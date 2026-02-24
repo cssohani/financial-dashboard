@@ -5,9 +5,9 @@ import { getCache, setCache } from '@/src/lib/cache/simpleCache';
 export const runtime = 'nodejs';
 
 /**
- * IMPORTANT:
- * Add this to frontend/.env.local
- *   TWELVE_DATA_API_KEY=your_key_here
+ * Requires:
+ *   TWELVE_DATA_API_KEY=...
+ * in frontend/.env.local
  */
 
 type CompanySnapshot = {
@@ -34,6 +34,7 @@ type CompanySnapshot = {
     price: number | null;
     change: number | null;
     changePercent: number | null; // fraction: 0.0123 = 1.23%
+    previousClose: number | null;
     open: number | null;
     high: number | null;
     low: number | null;
@@ -76,7 +77,7 @@ type TDQuoteResponse = {
   exchange?: string;
   currency?: string;
 
-  datetime?: string; // often "YYYY-MM-DD" or "YYYY-MM-DD HH:mm:ss"
+  datetime?: string; // "YYYY-MM-DD" or "YYYY-MM-DD HH:mm:ss"
   close?: string;
   open?: string;
   high?: string;
@@ -122,7 +123,9 @@ type TDProfileResponse = {
 
 type TDStatisticsResponse = {
   status?: 'ok' | 'error';
-  // Statistics fields vary by plan/coverage; treat as unknown bag and pick what we can
+  // Often: { meta: {...}, values: {...}, status: "ok" }
+  meta?: unknown;
+  values?: unknown;
   [k: string]: unknown;
 } & TDErrorResponse;
 
@@ -146,7 +149,7 @@ async function fetchTDJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { cache: 'no-store' });
   const json = (await res.json().catch(() => ({}))) as any;
 
-  // Twelve Data often returns 200 with {status:"error", message: "..."}
+  // Twelve Data sometimes returns 200 + {status:"error", message:"..."}
   if (!res.ok || json?.status === 'error') {
     const msg = json?.message || `Twelve Data request failed (${res.status})`;
     throw new Error(msg);
@@ -155,11 +158,12 @@ async function fetchTDJson<T>(url: string): Promise<T> {
   return json as T;
 }
 
-async function tryFetchTDJson<T>(url: string): Promise<T | null> {
+async function tryFetchTDJson<T>(url: string): Promise<{ data: T | null; error: string | null }> {
   try {
-    return await fetchTDJson<T>(url);
-  } catch {
-    return null;
+    const data = await fetchTDJson<T>(url);
+    return { data, error: null };
+  } catch (e: any) {
+    return { data: null, error: e?.message || 'Unknown error' };
   }
 }
 
@@ -171,7 +175,6 @@ function validateTicker(raw: string): string | null {
 
 function toISODate(d: string | undefined | null): string | null {
   if (!d) return null;
-  // "YYYY-MM-DD HH:mm:ss" -> "YYYY-MM-DD"
   return d.slice(0, 10);
 }
 
@@ -190,11 +193,30 @@ function fracFromPercent(v: unknown): number | null {
   return n / 100;
 }
 
-function pickNumber(obj: Record<string, unknown> | null | undefined, keys: string[]): number | null {
-  if (!obj) return null;
+function pickNumber(obj: any, keys: string[]): number | null {
+  if (!obj || typeof obj !== 'object') return null;
   for (const k of keys) {
-    const v = obj[k];
-    const n = num(v);
+    const n = num(obj[k]);
+    if (n !== null) return n;
+  }
+  return null;
+}
+
+function pickPathNumber(obj: any, paths: string[]): number | null {
+  if (!obj || typeof obj !== 'object') return null;
+  for (const path of paths) {
+    let cur: any = obj;
+    const parts = path.split('.');
+    let ok = true;
+    for (const p of parts) {
+      if (!cur || typeof cur !== 'object' || !(p in cur)) {
+        ok = false;
+        break;
+      }
+      cur = cur[p];
+    }
+    if (!ok) continue;
+    const n = num(cur);
     if (n !== null) return n;
   }
   return null;
@@ -229,8 +251,9 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: 'Invalid ticker.' }, { status: 400 });
   }
 
-  // Cache longer to avoid burning credits while developing
-  const cacheKey = `snapshot:twelvedata:v1:${ticker}`;
+  // Bump this version whenever you change mapping to avoid stale cached snapshots
+  const cacheKey = `snapshot:twelvedata:v4:${ticker}`;
+
   if (!refresh) {
     const cached = getCache<CompanySnapshot>(cacheKey);
     if (cached.hit) {
@@ -248,7 +271,7 @@ export async function GET(req: Request) {
   const notes: string[] = [];
 
   try {
-    // Market data (generally available on free plans)
+    // Market data
     const quoteUrl = twelveUrl('/quote', { symbol: ticker });
     const tsUrl = twelveUrl('/time_series', {
       symbol: ticker,
@@ -257,23 +280,28 @@ export async function GET(req: Request) {
       format: 'JSON',
     });
 
-    // Fundamentals/metrics (availability depends on plan). We'll try, but won't fail snapshot if blocked.
+    // Fundamentals (Pro plan supports these)
     const profileUrl = twelveUrl('/profile', { symbol: ticker });
     const statsUrl = twelveUrl('/statistics', { symbol: ticker });
 
-    const [quote, ts, profile, stats] = await Promise.all([
+    
+    const [quote, ts, profileRes, statsRes] = await Promise.all([
       fetchTDJson<TDQuoteResponse>(quoteUrl),
       fetchTDJson<TDTimeSeriesResponse>(tsUrl),
       tryFetchTDJson<TDProfileResponse>(profileUrl),
       tryFetchTDJson<TDStatisticsResponse>(statsUrl),
     ]);
 
-    const values = Array.isArray(ts.values) ? ts.values : [];
-    if (!values.length) {
-      notes.push('missing_price_history');
-    }
+    const profile = profileRes.data;
+    const stats = statsRes.data;
 
-    // Twelve Data returns values newest -> oldest; we want oldest -> newest for charting
+    if (!profile && profileRes.error) notes.push(`profile_error:${profileRes.error}`);
+    if (!stats && statsRes.error) notes.push(`statistics_error:${statsRes.error}`);
+    console.log('STATS RAW:', JSON.stringify(stats, null, 2));
+    const values = Array.isArray(ts.values) ? ts.values : [];
+    if (!values.length) notes.push('missing_price_history');
+
+    // Twelve Data returns newest -> oldest; convert to oldest -> newest
     const history = values
       .map((v) => ({
         date: v.datetime?.slice(0, 10),
@@ -287,52 +315,79 @@ export async function GET(req: Request) {
       .reverse();
 
     const priceHistory1Y = history.map((p) => ({ date: p.date, close: p.close }));
-
     const closes = history.map((p) => p.close);
-    const highs = history.map((p) => p.high ?? NaN);
-    const lows = history.map((p) => p.low ?? NaN);
 
-    const { high: high52W, low: low52W } = highLow(
-      highs.filter((x) => Number.isFinite(x)) as number[]
-    );
+    // Use highs if present; otherwise fall back to closes
+    const highs = history.map((p) => p.high ?? p.close);
+    const { high: high52W, low: low52W } = highLow(highs);
 
-    // Approximate trading-day lookbacks
     const return1M = computeReturn(closes, 21);
     const return6M = computeReturn(closes, 126);
     const return1Y = closes.length >= 2 ? computeReturn(closes, closes.length - 1) : null;
 
-    // Profile fields (if available)
+    // Profile fields
     const profileName = profile?.name ?? ts.meta?.name ?? quote?.name ?? null;
     const profileExchange = profile?.exchange ?? ts.meta?.exchange ?? quote?.exchange ?? null;
     const profileCurrency = profile?.currency ?? ts.meta?.currency ?? quote?.currency ?? null;
 
+    // ---- THIS IS THE KEY FIX FOR KEY METRICS ----
+    // Twelve Data statistics is commonly nested under { values: {...} }
+    const statsRoot: any = stats as any;
+    const statsValues = statsRoot?.statistics ?? statsRoot?.values ?? statsRoot;
+
+    // Market Cap
     const marketCap =
       num(profile?.market_cap) ??
-      // some statistics payloads expose market cap under keys like "market_capitalization"
-      pickNumber(stats as any, ['market_cap', 'market_capitalization', 'marketCapitalization']) ??
+      pickPathNumber(statsValues, ['valuations_metrics.market_capitalization']) ??
+      pickNumber(statsValues, ['market_cap', 'market_capitalization', 'marketCapitalization']) ??
       null;
 
-    // Metrics (best-effort): depends on plan & symbol coverage
-    const peRatio = pickNumber(stats as any, ['pe_ratio', 'pe', 'pe_ttm', 'peTTM']);
-    const eps = pickNumber(stats as any, ['eps', 'eps_ttm', 'epsTTM', 'eps_diluted_ttm']);
+    // Key Metrics + Financial Health
+    const peRatio =
+      pickPathNumber(statsValues, ['valuations_metrics.trailing_pe', 'valuations_metrics.forward_pe']) ??
+      pickNumber(statsValues, ['trailing_pe', 'forward_pe', 'pe_ratio', 'pe', 'pe_ttm', 'peTTM']) ??
+      null;
+
+    const eps =
+      pickPathNumber(statsValues, ['financials.income_statement.diluted_eps_ttm']) ??
+      pickNumber(statsValues, ['diluted_eps_ttm', 'eps', 'eps_ttm', 'epsTTM', 'eps_diluted_ttm']) ??
+      null;
+
     const profitMargin =
-      pickNumber(stats as any, ['profit_margin', 'net_margin', 'netMargin']) ??
+      pickPathNumber(statsValues, ['financials.profit_margin']) ??
+      pickNumber(statsValues, ['profit_margin', 'profitMargins', 'net_margin', 'netMargin']) ??
       null;
+
     const operatingMargin =
-      pickNumber(stats as any, ['operating_margin', 'operating_margin_ttm', 'operatingMarginTTM']) ??
+      pickPathNumber(statsValues, ['financials.operating_margin']) ??
+      pickNumber(statsValues, ['operating_margin', 'operatingMargins', 'operating_margin_ttm', 'operatingMarginTTM']) ??
       null;
-    const roe = pickNumber(stats as any, ['roe', 'roe_ttm', 'roeTTM']) ?? null;
+
+    const roe =
+      pickPathNumber(statsValues, ['financials.return_on_equity_ttm']) ??
+      pickNumber(statsValues, ['return_on_equity_ttm', 'roe', 'roe_ttm', 'roeTTM', 'returnOnEquity']) ??
+      null;
+
     const debtToEquity =
-      pickNumber(stats as any, ['debt_to_equity', 'debtToEquity', 'total_debt_to_equity']) ?? null;
-    const revenueTTM = pickNumber(stats as any, ['revenue_ttm', 'revenueTTM']) ?? null;
-    const grossProfitTTM = pickNumber(stats as any, ['gross_profit_ttm', 'grossProfitTTM']) ?? null;
+      pickPathNumber(statsValues, ['financials.balance_sheet.total_debt_to_equity_mrq']) ??
+      pickNumber(statsValues, ['total_debt_to_equity_mrq', 'debt_to_equity', 'debtToEquity', 'total_debt_to_equity']) ??
+      null;
+
+    const revenueTTM =
+      pickPathNumber(statsValues, ['financials.income_statement.revenue_ttm']) ??
+      pickNumber(statsValues, ['revenue_ttm', 'revenueTTM', 'total_revenue']) ??
+      null;
+
+    const grossProfitTTM =
+      pickPathNumber(statsValues, ['financials.income_statement.gross_profit_ttm']) ??
+      pickNumber(statsValues, ['gross_profit_ttm', 'grossProfitTTM', 'gross_profits']) ??
+      null;
 
     if (!profile) notes.push('profile_unavailable');
     if (!stats) notes.push('statistics_unavailable');
 
     const latestTradingDay =
-      toISODate(quote?.datetime) ??
-      (priceHistory1Y.length ? priceHistory1Y[priceHistory1Y.length - 1].date : null);
+      toISODate(quote?.datetime) ?? (priceHistory1Y.length ? priceHistory1Y[priceHistory1Y.length - 1].date : null);
 
     const snapshot: CompanySnapshot = {
       ticker,
@@ -358,6 +413,7 @@ export async function GET(req: Request) {
         price: num(quote?.close),
         change: num(quote?.change),
         changePercent: fracFromPercent(quote?.percent_change),
+        previousClose: num(quote?.previous_close),
         open: num(quote?.open),
         high: num(quote?.high),
         low: num(quote?.low),
@@ -387,10 +443,14 @@ export async function GET(req: Request) {
       priceHistory1Y,
     };
 
-    // Cache for 1 hour to reduce API credits usage during dev
-    // Only cache if we have enough history to be meaningful
+    
     if (priceHistory1Y.length >= 30) {
-      setCache(cacheKey, snapshot, 60 * 60 * 1000);
+      if (stats) {
+        setCache(cacheKey, snapshot, 60 * 60 * 1000);
+      } else {
+        // short cache to avoid hammering API during rapid typing, but allow quick recovery
+        setCache(cacheKey, snapshot, 2 * 60 * 1000);
+      }
     }
 
     return NextResponse.json(snapshot);
