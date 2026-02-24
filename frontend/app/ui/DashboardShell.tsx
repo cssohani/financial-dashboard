@@ -21,7 +21,7 @@ export default function DashboardShell() {
     <main className="min-h-screen bg-black text-zinc-100">
       <div className="mx-auto max-w-3xl px-4 py-16">
         <div className="mb-8">
-          <div className="text-2xl font-semibold">Mini Financial Research Dashboard</div>
+          <div className="text-2xl font-semibold">Financial Research Dashboard</div>
           <div className="mt-2 text-sm text-zinc-500">
             Search a ticker to view price, key metrics, and performance — fast.
           </div>
